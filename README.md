@@ -1,0 +1,2 @@
+# lsdj-player
+Loads an LSDJ exported song and plays it directly on Game Boy hardware. It can display an image while the track plays.
