@@ -1,41 +1,76 @@
-; lsdpack - standalone LSDj (Little Sound Dj) recorder + player {{{
-; Copyright (C) 2018  Johan Kotlinski
-; https://www.littlesounddj.com
-;
-; This program is free software; you can redistribute it and/or modify
-; it under the terms of the GNU General Public License as published by
-; the Free Software Foundation; either version 2 of the License, or
-; (at your option) any later version.
-;
-; This program is distributed in the hope that it will be useful,
-; but WITHOUT ANY WARRANTY; without even the implied warranty of
-; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-; GNU General Public License for more details.
-;
-; You should have received a copy of the GNU General Public License along
-; with this program; if not, write to the Free Software Foundation, Inc.,
-; 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. }}}
-
-if __RGBDS_MAJOR__ != 0 || __RGBDS_MINOR__ != 5 || __RGBDS_PATCH__ != 1
-    warn "Unknown RGBDS version {__RGBDS_VERSION__}! lsdpack was tested with RGBDS 0.5.1"
-endc
-
-; An example for how to call the player. Displays CPU usage
-; using raster bars. Press A to skip to the next song.
-;
-; Replace with your own game, music selector or whatever
-; you feel like :)
+INCLUDE "hardware.inc"			; system defines
 
 SECTION "tim",ROM0[$50]
     jp  tim_handler
 
 SECTION "boot",ROM0[$100]
-    jr  $150
+    jp	start
 
 SECTION "setup",ROM0[$150]
-    ; setup joypad reading
-    ld  a,$10
-    ldh [0],a
+
+start:
+	di					; disable interrupts
+	ld	sp,$E000			; setup stack
+
+.wait_vbl					; wait for vblank to properly disable lcd
+	ld	a,[rLY]	
+	cp	$90
+	jr	nz,.wait_vbl
+	di					; disable interrupts
+	ld	sp,$E000			; setup stack
+
+	xor	a				; reset important registers
+	ld	[rIF],a
+	ld	[rLCDC],a
+	ld	[rSTAT],a
+	ld	[rSCX],a
+	ld	[rSCY],a
+	ld	[rLYC],a
+	ld	[rIE],a
+	ld	[rVBK],a
+	ld	[rSVBK],a
+	ld	[rRP],a
+
+	ld	hl,_RAM                         ; clear ram (fill with a which is 0 here)
+	ld	bc,$2000-2			; watch out for stack ;)
+	call	fill
+
+	ld	hl,_HRAM			; clear hram
+	ld	c,$80				; a = 0, b = 0 here, so let's save a byte and 4 cycles (ld c,$80 - 2/8 vs ld bc,$80 - 3/12)
+	call	fill
+						; no point in clearing vram, we'll overwrite it with picture data anyway
+						; lcdc is already disabled so we have 'easy' access to vram
+
+	ld	hl,picture_chr			; picture data
+	ld	de,_VRAM			; place it between $8000-8FFF (tiles are numbered here from 0 to 255)
+	ld	bc,3952				; gbhorror.chr file size
+	call 	copy
+
+	ld	hl,picture_map			; picture map (160x144px padded = 32*18)
+	ld	de,_SCRN0			; place it at $9800
+	ld	bc,576				; gbcyus.map file size
+	call	copy
+
+	ld	a,1				; switch to vram bank 1
+	ld	[rVBK],a			; this is where we place attribute map
+
+	ld	hl,picture_atr			; picture attributes
+	ld	de,_SCRN0			; place it at $9800 just like map
+	ld	bc,576				; gbcyus.atr file size
+	call	copy
+
+	xor	a				; switch back to vram bank 0
+	ld	[rVBK],a
+
+	ld	hl,picture_pal			; picture palette
+	ld	b,64				; gbcyus.pal file size
+						; 1 palette has 4 colors, 1 color takes 2 bytes, so 8 palettes = 64 bytes
+	call	set_bg_pal
+
+	
+	ld	a,LCDCF_ON | LCDCF_BG8000 | LCDCF_BG9800 | LCDCF_OBJ8 | LCDCF_OBJOFF | LCDCF_WINOFF | LCDCF_BGON
+						; lcd setup: tiles at $8000, map at $9800, 8x8 sprites (disabled), no window, etc.
+	ld	[rLCDC],a			; enable lcd
 
     ; setup timer
     ld  a,256-183
@@ -52,55 +87,61 @@ SECTION "setup",ROM0[$150]
     ei
 
 mainloop:
-
-.wait_button_pressed:
-    ldh a,[0]
-    and $f
-    cp  $f
-    jr  z,.wait_button_pressed
-
-    ; play next song
-    inc e
-    ld  a,e
-    ; reached last song?
-    cp  a,(SongLocationsEnd - SongLocations) / 4
-    jr  nz,.play_song
-    xor a ; go back to first song
-    ld  e,a
-.play_song
-    di
-    call    LsdjPlaySong
-    ei
-
-    call    .delay
-
-.wait_button_released
-    ldh a,[0]
-    and $f
-    cp  $f
-    jr  nz,.wait_button_released
-
-    call    .delay
-
     jr  mainloop
-
-.delay
-    xor a
-.delay_loop
-    inc a
-    jr  nz,.delay_loop
-    ret
 
 tim_handler:
     push    af
 
-    ld  a,$ff   ; black background
-    ldh [$47],a
-
     call LsdjTick
-
-    xor a   ; white background
-    ldh [$47],a
 
     pop af
     reti
+
+copy:
+	inc	b
+	inc	c
+	jr	.skip
+.copy
+	ld	a,[hl+]
+	ld	[de],a
+	inc	de
+.skip
+	dec	c
+	jr	nz,.copy
+	dec	b
+	jr	nz,.copy
+	ret
+
+fill:
+	inc	b
+	inc	c
+	jr	.skip
+.fill
+	ld	[hl+],a
+.skip
+	dec	c
+	jr	nz,.fill
+	dec	b
+	jr	nz,.fill
+	ret
+
+set_bg_pal:
+	ld	a,%10000000			; bit 7 - enable palette auto increment
+						; bits 5,4,3 - palette number (0-7)
+						; bits 2,1 - color number (0-3)
+	ld	[rBCPS],a			; we start from color #0 in palette #0 and let the hardware to auto increment those values while we copy palette data
+.copy
+	ld	a,[hl+]				; this is really basic = slow way of doing things
+	ldh	[rBCPD],a
+	dec	b
+	jr	nz,.copy
+	ret
+
+picture_chr:
+    INCBIN	"gbcyus.chr"
+picture_map:
+	INCBIN	"gbcyus.map"
+picture_atr:
+	INCBIN	"gbcyus.atr"
+picture_pal:
+	INCBIN	"gbcyus.pal"
